@@ -108,7 +108,7 @@ if [ -z "${WG_PASSWORD:-}" ]; then
   if [ -f "$PASSWORD_FILE" ]; then
     WG_PASSWORD="$(grep -oP '^WG_PASSWORD=\K.*' "$PASSWORD_FILE" || true)"
   else
-    WG_PASSWORD="$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)"
+    WG_PASSWORD="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
     printf 'WG_PASSWORD=%s\n' "$WG_PASSWORD" > "$PASSWORD_FILE"
     chmod 600 "$PASSWORD_FILE"
     log "generated admin password -> $PASSWORD_FILE"
