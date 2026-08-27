@@ -255,6 +255,43 @@ setup_dnat() {
   done
 }
 
+setup_wg_firewall_persist() {
+  local IFACE
+  IFACE="$(ip route get 1.1.1.1 2>/dev/null | awk '{print $5; exit}')"
+  IFACE="${IFACE:-eth0}"
+  log "configuring host forwarding/NAT for wg (iface ${IFACE})..."
+  priv tee /usr/local/sbin/wg-easy-firewall.sh >/dev/null <<EOF
+#!/usr/bin/env bash
+# wg-easy forwarding + NAT in the active (nft) backend, matching ufw.
+set -euo pipefail
+iptables -C FORWARD -i wg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg0 -j ACCEPT
+iptables -C FORWARD -o wg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -o wg0 -j ACCEPT
+iptables -t nat -C POSTROUTING -s ${IPV4_CIDR} -o ${IFACE} -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s ${IPV4_CIDR} -o ${IFACE} -j MASQUERADE
+if command -v ip6tables >/dev/null 2>&1; then
+  ip6tables -C FORWARD -i wg0 -j ACCEPT 2>/dev/null || ip6tables -I FORWARD 1 -i wg0 -j ACCEPT
+  ip6tables -C FORWARD -o wg0 -j ACCEPT 2>/dev/null || ip6tables -I FORWARD 1 -o wg0 -j ACCEPT
+  ip6tables -t nat -C POSTROUTING -s ${IPV6_CIDR} -o ${IFACE} -j MASQUERADE 2>/dev/null || ip6tables -t nat -A POSTROUTING -s ${IPV6_CIDR} -o ${IFACE} -j MASQUERADE
+fi
+EOF
+  priv chmod 755 /usr/local/sbin/wg-easy-firewall.sh
+  priv tee /etc/systemd/system/wg-firewall.service >/dev/null <<EOF
+[Unit]
+Description=wg-easy host forwarding/NAT
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/wg-easy-firewall.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  priv systemctl daemon-reload
+  priv systemctl enable --now wg-firewall.service
+}
+
 log "writing unit files..."
 write_wg_unit "$WITH_INIT"
 write_caddy_unit
@@ -266,6 +303,7 @@ priv systemctl start wg-easy.service
 priv systemctl start caddy.service
 priv systemctl enable --now podman-auto-update.timer
 setup_dnat
+setup_wg_firewall_persist
 
 # --- strip INIT_PASSWORD after first successful setup ------------------------
 if [ "$WITH_INIT" = "1" ]; then
