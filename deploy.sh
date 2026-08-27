@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${REPO_DIR}/.env"
+SYSTEMD_DIR="/etc/containers/systemd"
+NET_NAME="wg-easy-net"
+PASSWORD_FILE="${HOME}/.wg-easy/credentials"
+
+log() { printf '\033[1;34m[deploy]\033[0m %s\n' "$*"; }
+err() { printf '\033[1;31m[deploy][error]\033[0m %s\n' "$*" >&2; }
+die() { err "$*"; exit 1; }
+
+# --- resolve sudo -----------------------------------------------------------
+if [ "$(id -u)" -eq 0 ]; then
+  SUDO=""
+else
+  sudo -n true 2>/dev/null || die "need passwordless sudo (sudo -n). Run as a non-root user with passwordless sudo."
+  SUDO="sudo"
+fi
+priv() { $SUDO "$@"; }
+
+# --- load .env --------------------------------------------------------------
+[ -f "$ENV_FILE" ] || die "missing .env (cp .env.example .env and edit)"
+set -a
+. "$ENV_FILE"
+set +a
+
+# --- defaults ---------------------------------------------------------------
+WG_PORT="${WG_PORT:-51820}"
+WEB_UI_PORT="${WEB_UI_PORT:-51821}"
+DNS="${DNS:-9.9.9.9,149.112.112.112}"
+ALLOWED_IPS="${ALLOWED_IPS:-0.0.0.0/0,::/0}"
+IPV4_CIDR="${IPV4_CIDR:-10.8.0.0/24}"
+IPV6_CIDR="${IPV6_CIDR:-fd00:db8::/64}"
+WG_USERNAME="${WG_USERNAME:-admin}"
+WG_CONFIG="${WG_CONFIG:-/srv/wg-easy/config}"
+CADDY_CONFIG="${CADDY_CONFIG:-/srv/wg-easy/caddy}"
+ACME_EMAIL="${ACME_EMAIL:-}"
+
+[ -n "${WG_HOST:-}" ] || die "WG_HOST is required (your domain)."
+
+if [ -r /etc/os-release ]; then
+  . /etc/os-release
+  log "host: ${PRETTY_NAME:-unknown}"
+fi
+
+# --- podman ----------------------------------------------------------------
+if ! command -v podman >/dev/null 2>&1; then
+  log "installing podman..."
+  priv apt-get update -y
+  priv apt-get install -y podman
+fi
+
+# --- wireguard kernel module ------------------------------------------------
+log "ensuring wireguard module..."
+if ! priv modprobe wireguard 2>/dev/null; then
+  log "installing linux-modules-extra-$(uname -r)..."
+  priv apt-get install -y "linux-modules-extra-$(uname -r)"
+  priv modprobe wireguard || die "failed to load wireguard kernel module"
+fi
+
+# --- sysctls ---------------------------------------------------------------
+log "applying sysctls..."
+priv tee /etc/sysctl.d/99-wg-easy.conf >/dev/null <<'EOF'
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.src_valid_mark=1
+net.ipv6.conf.all.disable_ipv6=0
+net.ipv6.conf.all.forwarding=1
+net.ipv6.conf.default.forwarding=1
+EOF
+priv sysctl --system >/dev/null
+
+# --- firewall --------------------------------------------------------------
+if priv ufw status 2>/dev/null | grep -q "Status: active"; then
+  log "opening firewall ports..."
+  priv ufw allow 80/tcp
+  priv ufw allow 443/tcp
+  priv ufw allow "${WG_PORT}/udp"
+fi
+
+# --- admin password ---------------------------------------------------------
+mkdir -p "$(dirname "$PASSWORD_FILE")"
+umask 077
+if [ -z "${WG_PASSWORD:-}" ]; then
+  if [ -f "$PASSWORD_FILE" ]; then
+    WG_PASSWORD="$(grep -oP '^WG_PASSWORD=\K.*' "$PASSWORD_FILE" || true)"
+  else
+    WG_PASSWORD="$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)"
+    printf 'WG_PASSWORD=%s\n' "$WG_PASSWORD" > "$PASSWORD_FILE"
+    chmod 600 "$PASSWORD_FILE"
+    log "generated admin password -> $PASSWORD_FILE"
+  fi
+fi
+
+# --- directories -----------------------------------------------------------
+log "preparing directories..."
+priv mkdir -p "$WG_CONFIG" "$CADDY_CONFIG/data" "$CADDY_CONFIG/config"
+
+# --- systemd unit directory ------------------------------------------------
+priv mkdir -p "$SYSTEMD_DIR"
+
+# --- decide whether this is an initial deployment ---------------------------
+WITH_INIT=0
+[ -f "${WG_CONFIG}/wg0.conf" ] || WITH_INIT=1
+
+write_wg_unit() {
+  local include_init="$1"
+  if [ "$include_init" = "1" ]; then
+    priv tee "$SYSTEMD_DIR/wg-easy.container" >/dev/null <<EOF
+[Unit]
+Description=wg-easy (WireGuard + Web UI)
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image=ghcr.io/wg-easy/wg-easy:15
+ContainerName=wg-easy
+Network=${NET_NAME}
+PublishPort=${WG_PORT}:51820/udp
+Volume=${WG_CONFIG}:/etc/wireguard
+Volume=/lib/modules:/lib/modules:ro
+Capability=NET_ADMIN
+Capability=SYS_MODULE
+Capability=NET_RAW
+Environment=PORT=${WEB_UI_PORT}
+Environment=HOST=0.0.0.0
+Environment=INSECURE=true
+Environment=DISABLE_IPV6=false
+Environment=INIT_ENABLED=true
+Environment=INIT_USERNAME=${WG_USERNAME}
+Environment=INIT_PASSWORD=${WG_PASSWORD}
+Environment=INIT_HOST=${WG_HOST}
+Environment=INIT_PORT=51820
+Environment=INIT_DNS=${DNS}
+Environment=INIT_IPV4_CIDR=${IPV4_CIDR}
+Environment=INIT_IPV6_CIDR=${IPV6_CIDR}
+Environment=INIT_ALLOWED_IPS=${ALLOWED_IPS}
+Sysctl=net.ipv4.ip_forward=1
+Sysctl=net.ipv4.conf.all.src_valid_mark=1
+Sysctl=net.ipv6.conf.all.disable_ipv6=0
+Sysctl=net.ipv6.conf.all.forwarding=1
+Sysctl=net.ipv6.conf.default.forwarding=1
+Label=io.containers.autoupdate=registry
+
+[Service]
+Restart=unless-stopped
+TimeoutStartSec=0
+EOF
+  else
+    priv tee "$SYSTEMD_DIR/wg-easy.container" >/dev/null <<EOF
+[Unit]
+Description=wg-easy (WireGuard + Web UI)
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image=ghcr.io/wg-easy/wg-easy:15
+ContainerName=wg-easy
+Network=${NET_NAME}
+PublishPort=${WG_PORT}:51820/udp
+Volume=${WG_CONFIG}:/etc/wireguard
+Volume=/lib/modules:/lib/modules:ro
+Capability=NET_ADMIN
+Capability=SYS_MODULE
+Capability=NET_RAW
+Environment=PORT=${WEB_UI_PORT}
+Environment=HOST=0.0.0.0
+Environment=INSECURE=true
+Environment=DISABLE_IPV6=false
+Sysctl=net.ipv4.ip_forward=1
+Sysctl=net.ipv4.conf.all.src_valid_mark=1
+Sysctl=net.ipv6.conf.all.disable_ipv6=0
+Sysctl=net.ipv6.conf.all.forwarding=1
+Sysctl=net.ipv6.conf.default.forwarding=1
+Label=io.containers.autoupdate=registry
+
+[Service]
+Restart=unless-stopped
+TimeoutStartSec=0
+EOF
+  fi
+}
+
+write_caddy_unit() {
+  priv tee "$SYSTEMD_DIR/caddy.container" >/dev/null <<EOF
+[Unit]
+Description=Caddy reverse proxy for wg-easy
+Wants=network-online.target
+After=network-online.target
+Requires=wg-easy.service
+After=wg-easy.service
+
+[Container]
+Image=docker.io/library/caddy:2-alpine
+ContainerName=caddy
+Network=${NET_NAME}
+PublishPort=80:80
+PublishPort=443:443
+Volume=${CADDY_CONFIG}/Caddyfile:/etc/caddy/Caddyfile:ro
+Volume=${CADDY_CONFIG}/data:/data
+Volume=${CADDY_CONFIG}/config:/config
+Label=io.containers.autoupdate=registry
+
+[Service]
+Restart=unless-stopped
+EOF
+}
+
+write_caddyfile() {
+  if [ -n "$ACME_EMAIL" ]; then
+    priv tee "${CADDY_CONFIG}/Caddyfile" >/dev/null <<EOF
+{
+    email ${ACME_EMAIL}
+}
+${WG_HOST} {
+    reverse_proxy wg-easy:${WEB_UI_PORT}
+}
+EOF
+  else
+    priv tee "${CADDY_CONFIG}/Caddyfile" >/dev/null <<EOF
+${WG_HOST} {
+    reverse_proxy wg-easy:${WEB_UI_PORT}
+}
+EOF
+  fi
+}
+
+log "writing unit files..."
+write_wg_unit "$WITH_INIT"
+write_caddy_unit
+write_caddyfile
+
+log "reloading systemd and starting services..."
+priv systemctl daemon-reload
+priv systemctl enable --now wg-easy.service
+priv systemctl enable --now caddy.service
+priv systemctl enable --now podman-auto-update.timer
+
+# --- strip INIT_PASSWORD after first successful setup ------------------------
+if [ "$WITH_INIT" = "1" ]; then
+  log "waiting for wg-easy initial setup..."
+  found=0
+  for _ in $(seq 1 60); do
+    if [ -f "${WG_CONFIG}/wg0.conf" ]; then
+      found=1
+      break
+    fi
+    sleep 2
+  done
+  if [ "$found" = "1" ]; then
+    log "initial setup complete; removing INIT_PASSWORD from unit..."
+    write_wg_unit "0"
+    priv systemctl daemon-reload
+    priv systemctl restart wg-easy.service
+  else
+    err "wg0.conf not detected after startup; check logs: sudo journalctl -u wg-easy.service"
+  fi
+fi
+
+log "verifying..."
+priv podman ps --filter name=wg-easy --filter name=caddy --format 'table {{.Names}}\t{{.Status}}'
+log "done. WireGuard UDP ${WG_PORT}, web UI at https://${WG_HOST}"
