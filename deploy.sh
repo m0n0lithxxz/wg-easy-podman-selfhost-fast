@@ -141,9 +141,7 @@ ContainerName=wg-easy
 Network=host
 Volume=${WG_CONFIG}:/etc/wireguard
 Volume=/lib/modules:/lib/modules:ro
-Capability=NET_ADMIN
-Capability=SYS_MODULE
-Capability=NET_RAW
+AddCapability=NET_ADMIN SYS_MODULE NET_RAW
 Environment=PORT=${WEB_UI_PORT}
 Environment=HOST=0.0.0.0
 Environment=INSECURE=true
@@ -176,9 +174,7 @@ ContainerName=wg-easy
 Network=host
 Volume=${WG_CONFIG}:/etc/wireguard
 Volume=/lib/modules:/lib/modules:ro
-Capability=NET_ADMIN
-Capability=SYS_MODULE
-Capability=NET_RAW
+AddCapability=NET_ADMIN SYS_MODULE NET_RAW
 Environment=PORT=${WEB_UI_PORT}
 Environment=HOST=0.0.0.0
 Environment=INSECURE=true
