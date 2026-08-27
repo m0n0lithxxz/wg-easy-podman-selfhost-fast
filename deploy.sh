@@ -160,6 +160,8 @@ Label=io.containers.autoupdate=registry
 [Service]
 Restart=unless-stopped
 TimeoutStartSec=0
+[Install]
+WantedBy=multi-user.target
 EOF
   else
     priv tee "$SYSTEMD_DIR/wg-easy.container" >/dev/null <<EOF
@@ -184,6 +186,8 @@ Label=io.containers.autoupdate=registry
 [Service]
 Restart=unless-stopped
 TimeoutStartSec=0
+[Install]
+WantedBy=multi-user.target
 EOF
   fi
 }
@@ -208,6 +212,8 @@ Label=io.containers.autoupdate=registry
 
 [Service]
 Restart=unless-stopped
+[Install]
+WantedBy=multi-user.target
 EOF
 }
 
