@@ -4,7 +4,6 @@ set -Eeuo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${REPO_DIR}/.env"
 SYSTEMD_DIR="/etc/containers/systemd"
-NET_NAME="wg-easy-net"
 PASSWORD_FILE="${HOME}/.wg-easy/credentials"
 
 log() { printf '\033[1;34m[deploy]\033[0m %s\n' "$*"; }
@@ -37,6 +36,8 @@ WG_USERNAME="${WG_USERNAME:-admin}"
 WG_CONFIG="${WG_CONFIG:-/srv/wg-easy/config}"
 CADDY_CONFIG="${CADDY_CONFIG:-/srv/wg-easy/caddy}"
 ACME_EMAIL="${ACME_EMAIL:-}"
+TORRENT_PORT="${TORRENT_PORT:-}"
+TORRENT_CLIENT_IP="${TORRENT_CLIENT_IP:-}"
 
 [ -n "${WG_HOST:-}" ] || die "WG_HOST is required (your domain)."
 
@@ -78,6 +79,8 @@ net.ipv4.conf.all.src_valid_mark=1
 net.ipv6.conf.all.disable_ipv6=0
 net.ipv6.conf.all.forwarding=1
 net.ipv6.conf.default.forwarding=1
+net.ipv4.conf.all.rp_filter=0
+net.ipv4.conf.default.rp_filter=0
 EOF
 priv sysctl --system >/dev/null
 
@@ -89,6 +92,10 @@ priv ufw allow "${SSH_PORT}/tcp"
 priv ufw allow 80/tcp
 priv ufw allow 443/tcp
 priv ufw allow "${WG_PORT}/udp"
+if [ -n "${TORRENT_PORT:-}" ]; then
+  priv ufw allow "${TORRENT_PORT}/tcp"
+  priv ufw allow "${TORRENT_PORT}/udp"
+fi
 if ! priv ufw status 2>/dev/null | grep -q "Status: active"; then
   log "enabling ufw..."
   priv ufw --force enable
@@ -131,8 +138,7 @@ After=network-online.target
 [Container]
 Image=ghcr.io/wg-easy/wg-easy:15
 ContainerName=wg-easy
-Network=${NET_NAME}
-PublishPort=${WG_PORT}:51820/udp
+NetworkMode=host
 Volume=${WG_CONFIG}:/etc/wireguard
 Volume=/lib/modules:/lib/modules:ro
 Capability=NET_ADMIN
@@ -151,11 +157,6 @@ Environment=INIT_DNS=${DNS}
 Environment=INIT_IPV4_CIDR=${IPV4_CIDR}
 Environment=INIT_IPV6_CIDR=${IPV6_CIDR}
 Environment=INIT_ALLOWED_IPS=${ALLOWED_IPS}
-Sysctl=net.ipv4.ip_forward=1
-Sysctl=net.ipv4.conf.all.src_valid_mark=1
-Sysctl=net.ipv6.conf.all.disable_ipv6=0
-Sysctl=net.ipv6.conf.all.forwarding=1
-Sysctl=net.ipv6.conf.default.forwarding=1
 Label=io.containers.autoupdate=registry
 
 [Service]
@@ -172,8 +173,7 @@ After=network-online.target
 [Container]
 Image=ghcr.io/wg-easy/wg-easy:15
 ContainerName=wg-easy
-Network=${NET_NAME}
-PublishPort=${WG_PORT}:51820/udp
+NetworkMode=host
 Volume=${WG_CONFIG}:/etc/wireguard
 Volume=/lib/modules:/lib/modules:ro
 Capability=NET_ADMIN
@@ -183,11 +183,6 @@ Environment=PORT=${WEB_UI_PORT}
 Environment=HOST=0.0.0.0
 Environment=INSECURE=true
 Environment=DISABLE_IPV6=false
-Sysctl=net.ipv4.ip_forward=1
-Sysctl=net.ipv4.conf.all.src_valid_mark=1
-Sysctl=net.ipv6.conf.all.disable_ipv6=0
-Sysctl=net.ipv6.conf.all.forwarding=1
-Sysctl=net.ipv6.conf.default.forwarding=1
 Label=io.containers.autoupdate=registry
 
 [Service]
@@ -209,9 +204,7 @@ After=wg-easy.service
 [Container]
 Image=docker.io/library/caddy:2-alpine
 ContainerName=caddy
-Network=${NET_NAME}
-PublishPort=80:80
-PublishPort=443:443
+NetworkMode=host
 Volume=${CADDY_CONFIG}/Caddyfile:/etc/caddy/Caddyfile:ro
 Volume=${CADDY_CONFIG}/data:/data
 Volume=${CADDY_CONFIG}/config:/config
@@ -229,16 +222,35 @@ write_caddyfile() {
     email ${ACME_EMAIL}
 }
 ${WG_HOST} {
-    reverse_proxy wg-easy:${WEB_UI_PORT}
+    reverse_proxy 127.0.0.1:${WEB_UI_PORT}
 }
 EOF
   else
     priv tee "${CADDY_CONFIG}/Caddyfile" >/dev/null <<EOF
 ${WG_HOST} {
-    reverse_proxy wg-easy:${WEB_UI_PORT}
+    reverse_proxy 127.0.0.1:${WEB_UI_PORT}
 }
 EOF
   fi
+}
+
+setup_dnat() {
+  if [ -z "${TORRENT_PORT:-}" ] && [ -z "${TORRENT_CLIENT_IP:-}" ]; then
+    return
+  fi
+  if [ -z "${TORRENT_PORT:-}" ] || [ -z "${TORRENT_CLIENT_IP:-}" ]; then
+    err "TORRENT_PORT and TORRENT_CLIENT_IP must both be set to enable port forwarding; skipping"
+    return
+  fi
+  log "adding iptables DNAT ${TORRENT_PORT} (tcp+udp) -> ${TORRENT_CLIENT_IP}"
+  for proto in tcp udp; do
+    if ! priv iptables -t nat -C PREROUTING -p "$proto" --dport "$TORRENT_PORT" -j DNAT --to-destination "${TORRENT_CLIENT_IP}:${TORRENT_PORT}" 2>/dev/null; then
+      priv iptables -t nat -I PREROUTING 1 -p "$proto" --dport "$TORRENT_PORT" -j DNAT --to-destination "${TORRENT_CLIENT_IP}:${TORRENT_PORT}"
+    fi
+    if ! priv iptables -C FORWARD -d "$TORRENT_CLIENT_IP" -p "$proto" --dport "$TORRENT_PORT" -j ACCEPT 2>/dev/null; then
+      priv iptables -I FORWARD 1 -d "$TORRENT_CLIENT_IP" -p "$proto" --dport "$TORRENT_PORT" -j ACCEPT
+    fi
+  done
 }
 
 log "writing unit files..."
@@ -251,6 +263,7 @@ priv systemctl daemon-reload
 priv systemctl enable --now wg-easy.service
 priv systemctl enable --now caddy.service
 priv systemctl enable --now podman-auto-update.timer
+setup_dnat
 
 # --- strip INIT_PASSWORD after first successful setup ------------------------
 if [ "$WITH_INIT" = "1" ]; then

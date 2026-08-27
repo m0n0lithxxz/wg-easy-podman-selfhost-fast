@@ -51,3 +51,23 @@ _Avoid_: named volume (the opposite), volume (generic)
 **Auto-update**:
 Podman's `io.containers.autoupdate=registry` label combined with the `podman-auto-update.timer`, which pulls new images on a schedule.
 _Avoid_: watchtower, cron
+
+**Host network mode**:
+The wg-easy and Caddy containers share the host network namespace, so the WireGuard interface `wg0` lives on the host and host iptables can forward a public port to a WireGuard peer.
+_Avoid_: bridge network (the mode that puts `wg0` inside a container netns)
+
+**DNAT**:
+An iptables rule that rewrites a public TCP/UDP port to a target address, used here to forward an incoming torrent port to a client's WireGuard IP.
+_Avoid_: port redirect, NAT rule (generic)
+
+**Port forwarding (torrent)**:
+Routing an incoming public port on the VPS to a client's WireGuard interface, so a client behind CGNAT can accept inbound torrent connections.
+_Avoid_: inbound connections, open port (generic)
+
+**CGNAT**:
+A client environment with no public IP address. The reason traffic is routed through the VPS, which has one.
+_Avoid_: double NAT (narrower)
+
+**TORRENT_PORT / TORRENT_CLIENT_IP**:
+Configuration for the forwarded public port and the WireGuard IP of the torrent client.
+_Avoid_: listen port, client ip (ambiguous on their own)
