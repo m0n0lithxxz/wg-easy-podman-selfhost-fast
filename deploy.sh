@@ -262,8 +262,8 @@ write_caddyfile
 
 log "reloading systemd and starting services..."
 priv systemctl daemon-reload
-priv systemctl enable --now wg-easy.service
-priv systemctl enable --now caddy.service
+priv systemctl start wg-easy.service
+priv systemctl start caddy.service
 priv systemctl enable --now podman-auto-update.timer
 setup_dnat
 
