@@ -1,42 +1,42 @@
 # wg-easy-podman-selfhost-fast
 
-Deploy [wg-easy](https://github.com/wg-easy/wg-easy) (WireGuard + web admin UI) on Ubuntu with rootful Podman, fronted by Caddy for automatic HTTPS. Idempotent, opinionated defaults, and managed as systemd services.
+Deploy [wg-easy](https://github.com/wg-easy/wg-easy) (WireGuard + web admin UI) on Ubuntu, rootful Podman, Caddy HTTPS. Idempotent, opinionated, systemd.
 
 ## Architecture
 
-- **wg-easy** container: `ghcr.io/wg-easy/wg-easy:15`, publishes the WireGuard UDP port only.
-- **Caddy** container: `caddy:2-alpine`, publishes ports 80/443 and terminates TLS, proxying to the wg-easy web UI.
-- Both run on a shared Podman network (`wg-easy-net`), defined by Quadlet `.container` files in `/etc/containers/systemd/`.
+- wg-easy container: `ghcr.io/wg-easy/wg-easy:15`. Publish WireGuard UDP port only.
+- Caddy container: `caddy:2-alpine`. Publish 80/443, terminate TLS, proxy to wg-easy web UI.
+- Both on shared Podman network `wg-easy-net`, Quadlet `.container` files in `/etc/containers/systemd/`.
 - Images auto-update via `podman-auto-update.timer`.
 
-## Prerequisites
+## Prereq
 
-- Ubuntu 24.04+ host (a remote VPS), run as a non-root user with passwordless sudo (`sudo -n`).
-- A domain with an `A`/`AAAA` record pointing at the host.
-- Firewall open on `80/tcp`, `443/tcp`, and `51820/udp` (host-level or cloud firewall).
-- The `wireguard` kernel module available (script installs `linux-modules-extra-$(uname -r)` if needed).
+- Ubuntu 24.04+ VPS. Non-root user w/ passwordless sudo (`sudo -n`).
+- Domain A/AAAA record to host.
+- Firewall open `80/tcp`, `443/tcp`, `51820/udp`. Script configure via ufw.
+- `wireguard` kernel module. Script install `linux-modules-extra-$(uname -r)` if missing.
 
 ## Usage
 
 ```bash
-cp .env.example .env      # edit WG_HOST (and ACME_EMAIL if you want cert expiry emails)
+cp .env.example .env      # set WG_HOST (optional ACME_EMAIL)
 ./deploy.sh
 ```
 
-The first run generates a strong random admin password and writes it to `~/.wg-easy/credentials` (mode 600). The `INIT_PASSWORD` is stripped from the unit after the initial setup completes.
+First run: generates strong random admin password, writes `~/.wg-easy/credentials` (mode 600). Strips `INIT_PASSWORD` from unit after setup.
 
-After a successful deploy, open `https://<WG_HOST>` to log in and manage clients.
+Open `https://<WG_HOST>` to login, manage clients.
 
-## Configuration
+## Config
 
-See `.env.example` for all options. The defaults are opinionated:
+See `.env.example`. Opinionated defaults:
 
-- IPv6 enabled (dual-stack).
-- Full tunnel (`0.0.0.0/0,::/0`).
-- Quad9 DNS (`9.9.9.9,149.112.112.112`).
-- Unattended setup via `INIT_*` variables.
-- Config bind mounts under `/srv/wg-easy`.
+- IPv6 on.
+- Full tunnel `0.0.0.0/0,::/0`.
+- Quad9 DNS `9.9.9.9,149.112.112.112`.
+- Unattended setup via `INIT_*`.
+- Config bind mount `/srv/wg-easy`.
 
-## Re-running
+## Re-run
 
-`deploy.sh` is idempotent; it is safe to run again to apply config changes or after a reboot. If the config directory already contains `wg0.conf`, it skips the unattended setup and the password removal step.
+`deploy.sh` idempotent. Re-run safe for config change / after reboot. If `wg0.conf` exists in config, skip unattended setup + password strip.
