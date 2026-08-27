@@ -138,7 +138,7 @@ After=network-online.target
 [Container]
 Image=ghcr.io/wg-easy/wg-easy:15
 ContainerName=wg-easy
-NetworkMode=host
+Network=host
 Volume=${WG_CONFIG}:/etc/wireguard
 Volume=/lib/modules:/lib/modules:ro
 Capability=NET_ADMIN
@@ -173,7 +173,7 @@ After=network-online.target
 [Container]
 Image=ghcr.io/wg-easy/wg-easy:15
 ContainerName=wg-easy
-NetworkMode=host
+Network=host
 Volume=${WG_CONFIG}:/etc/wireguard
 Volume=/lib/modules:/lib/modules:ro
 Capability=NET_ADMIN
@@ -204,7 +204,7 @@ After=wg-easy.service
 [Container]
 Image=docker.io/library/caddy:2-alpine
 ContainerName=caddy
-NetworkMode=host
+Network=host
 Volume=${CADDY_CONFIG}/Caddyfile:/etc/caddy/Caddyfile:ro
 Volume=${CADDY_CONFIG}/data:/data
 Volume=${CADDY_CONFIG}/config:/config
