@@ -45,19 +45,29 @@ if [ -r /etc/os-release ]; then
   log "host: ${PRETTY_NAME:-unknown}"
 fi
 
-# --- podman ----------------------------------------------------------------
+# --- dependency check ------------------------------------------------------
+log "checking dependencies..."
+for cmd in bash grep awk sed tr; do
+  command -v "$cmd" >/dev/null 2>&1 || die "missing required tool: $cmd"
+done
+
 if ! command -v podman >/dev/null 2>&1; then
   log "installing podman..."
   priv apt-get update -y
   priv apt-get install -y podman
 fi
+log "podman version: $(podman --version 2>/dev/null | awk '{print $3}')"
 
-# --- wireguard kernel module ------------------------------------------------
-log "ensuring wireguard module..."
+log "ensuring wireguard kernel module..."
 if ! priv modprobe wireguard 2>/dev/null; then
   log "installing linux-modules-extra-$(uname -r)..."
   priv apt-get install -y "linux-modules-extra-$(uname -r)"
   priv modprobe wireguard || die "failed to load wireguard kernel module"
+fi
+
+if ! command -v ufw >/dev/null 2>&1; then
+  log "installing ufw..."
+  priv apt-get install -y ufw
 fi
 
 # --- sysctls ---------------------------------------------------------------
@@ -71,12 +81,17 @@ net.ipv6.conf.default.forwarding=1
 EOF
 priv sysctl --system >/dev/null
 
-# --- firewall --------------------------------------------------------------
-if priv ufw status 2>/dev/null | grep -q "Status: active"; then
-  log "opening firewall ports..."
-  priv ufw allow 80/tcp
-  priv ufw allow 443/tcp
-  priv ufw allow "${WG_PORT}/udp"
+# --- firewall (ufw) --------------------------------------------------------
+SSH_PORT="$(awk '/^[[:space:]]*Port[[:space:]]+/{print $2; exit}' /etc/ssh/sshd_config 2>/dev/null)"
+SSH_PORT="${SSH_PORT:-22}"
+log "configuring ufw (allowing ssh ${SSH_PORT}/tcp)..."
+priv ufw allow "${SSH_PORT}/tcp"
+priv ufw allow 80/tcp
+priv ufw allow 443/tcp
+priv ufw allow "${WG_PORT}/udp"
+if ! priv ufw status 2>/dev/null | grep -q "Status: active"; then
+  log "enabling ufw..."
+  priv ufw --force enable
 fi
 
 # --- admin password ---------------------------------------------------------
